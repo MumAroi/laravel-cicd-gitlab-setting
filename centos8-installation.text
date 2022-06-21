@@ -1,0 +1,242 @@
+#install the remi repository
+dnf install https://rpms.remirepo.net/enterprise/remi-release-8.rpm
+
+#install the epel repository 
+dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+
+#update package
+yum update
+
+#install nginx
+dnf install -y nginx
+
+#install cerbot
+dnf install certbot python3-certbot-nginx
+
+#start the nginx service
+systemctl start nginx
+
+#auto start nginx on boot
+systemctl enable nginx
+
+#check nginx status
+systemctl status nginx
+
+#install redis
+dnf install -y redis
+
+#start the redis service
+systemctl start redis 
+
+#auto start redis on boot
+systemctl enable redis
+
+#check redis status
+systemctl status redis
+
+#install firewalld
+dnf install -y firewalld
+
+#start the firewalld service
+systemctl start firewalld
+
+#auto start firewalld on boot
+systemctl enable firewalld
+
+#allow http https in the firewall
+firewall-cmd --add-service=http
+firewall-cmd --add-service=https
+firewall-cmd --runtime-to-permanent
+
+#allow port 80 (http) in the firewall
+firewall-cmd --permanent --add-port=80/tcp
+
+#allow port 6379 (redis/tcp) in the firewall
+firewall-cmd --new-zone=redis --permanent
+firewall-cmd --zone=redis --add-port=6379/tcp --permanent
+
+#reload firewall configuration
+firewall-cmd --reload
+
+#install supervisor
+dnf install -y supervisor
+
+#start the supervisord service
+systemctl start supervisord
+
+#auto start supervisord on boot
+systemctl enable supervisord
+
+#check supervisord status
+systemctl status supervisord
+
+#install wget
+dnf install -y  wget
+
+#install uzip
+dnf install -y unzip
+
+#install policycoreutils-python
+dnf install -y policycoreutils-python
+
+#install yum-utils
+dnf install -y yum-utils
+
+#install git
+dnf install -y git
+
+#install php 8
+yum-config-manager --enable remi-php81
+dnf module reset php
+dnf module install php:remi-8.1
+
+#install php modules
+dnf install  php php-fpm php-common php-opcache php-pecl-apcu php-cli php-pear php-pdo php-mysqlnd php-pecl-redis php-gd php-mbstring php-mcrypt php-xml php-zip
+
+#start the php-fpm service
+systemctl start php-fpm
+
+#auto start php-fpm on boot
+systemctl enable php-fpm
+
+#check php-fpm status
+systemctl status php-fpm
+
+#install composer
+curl -sS https://getcomposer.org/installer | php
+mv composer.phar /usr/local/bin/composer
+chmod +x /usr/local/bin/composer
+
+#change php-fpm user to nginx:nginx
+vi /etc/php-fpm.d/www.conf
+	listen = 127.0.0.1:9000
+	users = nginx
+	group = nginx
+
+#change project directory permissions
+chown -R nginx:nginx /var/www/html/yourproject
+chmod -R 775 /var/www/html/yourproject
+
+#change the context of the laravel project directories
+semanage fcontext -a -t httpd_sys_rw_content_t '/var/www/html/yourproject(/.*)?'
+
+#run selinux restorecon command
+restorecon -Rv '/var/www/html/yourproject/'
+
+#add user 
+adduser deployer
+setfacl -R -m u:deployer:rwx /var/www/html/yourproject
+cd /home/deployer/
+mkdir -p /home/deployer/.ssh
+ssh-keygen -t rsa -b 2048 -C "deployer-gitlab"
+cat /home/deployer/.ssh/id_ed25519.pub >> /home/deployer/.ssh/authorized_keys 
+
+# create nginx file
+vi /etc/nginx/conf.d/yourdomain.conf
+
+# confix nginx 
+server {
+	listen      80;
+	server_name yourdomain.me;
+	root        /var/www/html/yourproject/laravel_project/public;
+        index index.php index.html index.htm;
+	
+	proxy_read_timeout 600;
+   	proxy_connect_timeout 600;
+   	proxy_send_timeout 600;
+
+	charset utf-8;
+	gzip on;
+	gzip_types text/css application/javascript text/javascript application/x-javascript 	image/svg+xml text/plain text/xsd text/xsl text/xml image/x-icon;
+	location / {
+		try_files $uri $uri/ /index.php?$query_string;
+	}
+	
+	location ~ \.php {
+        include /etc/nginx/fastcgi_params;
+        fastcgi_pass  127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+	}
+
+	location ~ /\.ht {
+		deny all;
+	}
+}
+
+#obtaining a certificate
+certbot --nginx -d yourdomain.me
+openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
+
+#setting up auto renewal cerbot
+crontab -e
+15 3 * * * /usr/bin/certbot renew --quiet
+* * * * * cd /var/www/html/yourproject/laravel_project && php artisan schedule:run >> /dev/null 2>&1
+ 
+# allow httpd_can_network_connect_db and httpd_can_network_connect
+getsebool -a | grep httpd
+setsebool -P httpd_can_network_connect_db 1
+setsebool -P httpd_can_network_connect 1
+
+#config opcache
+vi /etc/php.d/10-opcache.ini
+	opcache.enable=1
+	opcache.memory_consumption=512
+	opcache.interned_strings_buffer=64
+	opcache.max_accelerated_files=32531
+	; validate_timestamp, 1 for dev, 0 for prod
+	opcache.validate_timestamp=1
+	; revalidate_freq, loc 0, Small traffic 600, large and medium 3600
+	opcache.revalidate_freq=0
+	opcache.save_comments=1
+
+# create supervisord file
+cd /etc/supervisord.d
+vi main.ini
+
+# confix supervisord 
+	[group:laravel-worker]
+	rity=999
+	programs=laravel-schedule,laravel-queue
+
+	[program:laravel-schedule]
+	numprocs=1
+	autostart=true
+	autorestart=true
+	redirect_stderr=true
+	process_name=%(program_name)s_%(process_num)02d
+	stdout_logfile=/var/www/html/yourproject/laravel_project/schedule.log
+	command=php /var/www/html/yourproject/laravel_project/artisan schedule:run
+	# command=/bin/sh -c "while [ true ]; do (php /var/www/html/yourproject/laravel_project/artisan schedule:run --verbose --no-interaction &); sleep 60; done"
+
+	[program:laravel-queue]
+	numprocs=5
+	autostart=true
+	autorestart=true
+	redirect_stderr=true
+	process_name=%(program_name)s_%(process_num)02d
+	stdout_logfile=/var/www/html/yourproject/laravel_project/worker.log
+	command=php /var/www/html/yourproject/laravel_project/artisan queue:work queuename --sleep=3 --tries=3
+
+# test ningx file 
+nginx -t
+
+#restart supervisorctl 
+supervisorctl restart all
+
+#create file for clear cache supervisorctl
+vi /root/supervisor-clear-cache.sh
+	supervisorctl stop all
+	supervisorctl reread
+	supervisorctl update
+	supervisorctl start all
+
+#run clear cache supervisor
+cd /root
+sh supervisor-clear-cache.sh
+
+# restart service php-fpm and nginx
+systemctl restart supervisord
+systemctl restart redis
+systemctl restart php-fpm
+systemctl restart nginx
