@@ -1,0 +1,48 @@
+
+image: registry.gitlab.com/paramas.wae.th/laravel-ci-cd/php8-fpm
+
+services:
+  - mysql:latest
+
+variables:
+  MYSQL_DATABASE: homestead
+  MYSQL_ROOT_PASSWORD: secret
+  DB_HOST: mysql
+  DB_USERNAME: root
+
+# This folder is cached between builds
+# https://docs.gitlab.com/ee/ci/yaml/index.html#cache
+cache:
+  paths:
+    - vendor/
+  #  - node_modules/
+
+# This is a basic example for a gem or script which doesn't use
+# services such as redis or postgres
+before_script:
+  - composer install
+    
+test:
+  script:
+    # run laravel tests
+    - php vendor/bin/phpunit --coverage-text --colors=never
+    # run frontend tests
+    # if you have any task for testing frontend
+    # set it in your package.json script
+    # comment this out if you don't have a frontend test
+    #- npm test
+
+deploy:
+  script:
+    - 'which ssh-agent || ( apk update -y )'
+    - eval $(ssh-agent -s)
+    - ssh-add <(echo "$SSH_PRIVATE_KEY")
+    - mkdir -p ~/.ssh
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+    - php vendor/bin/envoy run deploy --commit="$CI_COMMIT_SHA"
+  environment:
+    name: production
+    url: http://192.168.1.1
+  when: manual
+  only:
+    - main
